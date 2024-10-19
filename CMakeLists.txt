@@ -5,6 +5,9 @@ add_library(mbedutils_lib_freertos STATIC ${FREERTOS_INTF_SOURCES})
 target_link_libraries(mbedutils_lib_freertos PRIVATE
     mbedutils_headers
     mbedutils_internal_headers
-    freertos_config  # Standard FreeRTOS integration target. Defined by the project for headers.
     etl::etl  # Embedded Template Library
+)
+
+target_link_libraries(mbedutils_lib_freertos PUBLIC
+    freertos_config  # Standard FreeRTOS integration target. Defined by the project for headers.
 )
