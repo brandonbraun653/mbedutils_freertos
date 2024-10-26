@@ -14,7 +14,7 @@ Includes
 #include <FreeRTOS.h>
 #include <etl/pool.h>
 #include <mbedutils/assert.hpp>
-#include <mbedutils/thread.hpp>
+#include <mbedutils/threading.hpp>
 #include <task.h>
 #include <limits>
 
