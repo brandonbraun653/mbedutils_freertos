@@ -53,7 +53,7 @@ namespace mb::thread::intf
   Public Functions
   ---------------------------------------------------------------------------*/
 
-  void initialize()
+  void driver_setup()
   {
     mbed_assert( mb::osal::buildMutexStrategy( s_task_mutex ) );
   }
