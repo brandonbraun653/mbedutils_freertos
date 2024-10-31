@@ -229,6 +229,13 @@ namespace mb::osal
   }
 
 
+  void deallocateRecursiveMutex( mb_recursive_mutex_t &mutex )
+  {
+    // TODO: Implement when/if needed. Likely need to change to a pool allocator.
+    mbed_dbg_assert( mutex != nullptr );
+    mbed_assert_always();
+  }
+
   void lockRecursiveMutex( mb_recursive_mutex_t mutex )
   {
     if( xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED )

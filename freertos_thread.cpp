@@ -59,14 +59,14 @@ namespace mb::thread::intf
   }
 
 
-  TaskHandle create_task( const TaskConfig &cfg )
+  TaskHandle create_task( Task::Config &cfg )
   {
     /*---------------------------------------------------------------------------
     Input validation
     ---------------------------------------------------------------------------*/
     if( ( cfg.func == nullptr ) || ( cfg.name.empty() ) )
     {
-      return nullptr;
+      return 0;
     }
 
     /*-------------------------------------------------------------------------
@@ -79,10 +79,10 @@ namespace mb::thread::intf
     if( meta == nullptr )
     {
       mbed_assert_continue_msg( false, "FreeRTOS task meta pool is full" );
-      return nullptr;
+      return 0;
     }
 
-    meta->handle = nullptr;
+    meta->handle = 0;
     meta->task   = nullptr;
 
     /*-------------------------------------------------------------------------
@@ -150,7 +150,7 @@ namespace mb::thread::intf
     /*-------------------------------------------------------------------------
     Clean up allocated resources should the task fail to create for some reason
     -------------------------------------------------------------------------*/
-    if( meta->handle == nullptr )
+    if( meta->handle == 0 )
     {
       if( meta->task && s_task_pool.is_in_pool( meta->task ) )
       {
@@ -158,10 +158,10 @@ namespace mb::thread::intf
       }
 
       s_task_meta_pool.release( meta );
-      return nullptr;
+      return 0;
     }
 
-    return static_cast<void *>( meta );
+    return 0;
   }
 
 
@@ -170,7 +170,7 @@ namespace mb::thread::intf
     /*-------------------------------------------------------------------------
     Input validation
     -------------------------------------------------------------------------*/
-    if( task == nullptr )
+    if( task == 0 )
     {
       return;
     }
