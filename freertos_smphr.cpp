@@ -30,6 +30,7 @@ namespace mb::osal
   {
     StaticSemaphore_t data;
     SemaphoreHandle_t handle;
+    bool              in_use;
   };
 
   /*---------------------------------------------------------------------------
@@ -39,7 +40,6 @@ namespace mb::osal
 #if MBEDUTILS_OSAL_SEMAPHORE_POOL_SIZE > 0
   using smphr_array = etl::array<StaticSemaphore, MBEDUTILS_OSAL_SEMAPHORE_POOL_SIZE>;
   static smphr_array        s_smphr_pool;
-  static size_t             s_smphr_pool_index;
   static StaticSemaphore    s_smphr_pool_cs;
 #endif    // MBEDUTILS_OSAL_SEMAPHORE_POOL_SIZE > 0
 
@@ -50,13 +50,13 @@ namespace mb::osal
   void initSmphrDriver()
   {
 #if MBEDUTILS_OSAL_SEMAPHORE_POOL_SIZE > 0
-    s_smphr_pool_index = 0;
     s_smphr_pool_cs.handle = xSemaphoreCreateMutexStatic( &s_smphr_pool_cs.data );
 
     // Initialize the pool of semaphores
     for( auto &sem : s_smphr_pool )
     {
       sem.handle = nullptr;
+      sem.in_use = false;
     }
 #endif    // MBEDUTILS_OSAL_SEMAPHORE_POOL_SIZE > 0
   }
@@ -88,7 +88,7 @@ namespace mb::osal
   }
 
 
-  bool allocateSmphr( mb_smphr_t &s, const size_t maxCount, const size_t initialCount )
+  bool allocateSemaphore( mb_smphr_t &s, const size_t maxCount, const size_t initialCount )
   {
     bool allocated = false;
     mbed_dbg_assert( s == nullptr );
@@ -98,13 +98,16 @@ namespace mb::osal
 #if MBEDUTILS_OSAL_SEMAPHORE_POOL_SIZE > 0
     xSemaphoreTake( s_smphr_pool_cs.handle, portMAX_DELAY );
     {
-      if( s_smphr_pool_index < s_smphr_pool.size() )
+      for( auto &sem : s_smphr_pool )
       {
-        StaticSemaphore *sem = &s_smphr_pool[ s_smphr_pool_index ];
-        sem->handle = xSemaphoreCreateCountingStatic( maxCount, initialCount, &sem->data );
-        s_smphr_pool_index++;
-        s = reinterpret_cast<mb_smphr_t>( sem->handle );
-        allocated = true;
+        if( !sem.in_use )
+        {
+          sem.handle = xSemaphoreCreateCountingStatic( maxCount, initialCount, &sem.data );
+          s          = reinterpret_cast<mb_smphr_t>( sem.handle );
+          sem.in_use = true;
+          allocated  = true;
+          break;
+        }
       }
     }
     xSemaphoreGive( s_smphr_pool_cs.handle );
@@ -116,9 +119,23 @@ namespace mb::osal
 
   void deallocateSemaphore( mb_smphr_t &s )
   {
-    // TODO: Implement when/if needed. Likely need to change to a pool allocator.
     mbed_dbg_assert( s != nullptr );
-    mbed_assert_always();
+
+#if MBEDUTILS_OSAL_SEMAPHORE_POOL_SIZE > 0
+    xSemaphoreTake( s_smphr_pool_cs.handle, portMAX_DELAY );
+    {
+      for( auto &sem : s_smphr_pool )
+      {
+        if( sem.handle == reinterpret_cast<SemaphoreHandle_t>( s ) )
+        {
+          sem.in_use = false;
+          s          = nullptr;
+          break;
+        }
+      }
+    }
+    xSemaphoreGive( s_smphr_pool_cs.handle );
+#endif    // MBEDUTILS_OSAL_SEMAPHORE_POOL_SIZE > 0
   }
 
 

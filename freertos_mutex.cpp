@@ -30,6 +30,7 @@ namespace mb::osal
   {
     StaticSemaphore_t data;
     SemaphoreHandle_t handle;
+    bool in_use;
   };
 
   /*---------------------------------------------------------------------------
@@ -40,7 +41,6 @@ namespace mb::osal
   using mt_array = etl::array<StaticSemaphore, MBEDUTILS_OSAL_MUTEX_POOL_SIZE>;
 
   static mt_array        s_mutex_pool;
-  static size_t          s_mutex_pool_index;
   static StaticSemaphore s_mutex_pool_cs;
 #endif    // MBEDUTILS_OSAL_MUTEX_POOL_SIZE > 0
 
@@ -48,7 +48,6 @@ namespace mb::osal
   using rmt_array = etl::array<StaticSemaphore, MBEDUTILS_OSAL_RECURSIVE_MUTEX_POOL_SIZE>;
 
   static rmt_array       s_r_mutex_pool;
-  static size_t          s_r_mtx_pool_idx;
   static StaticSemaphore s_r_mtx_pool_cs;
 #endif    // MBEDUTILS_OSAL_RECURSIVE_MUTEX_POOL_SIZE > 0
 
@@ -59,24 +58,24 @@ namespace mb::osal
   void initMutexDriver()
   {
 #if MBEDUTILS_OSAL_MUTEX_POOL_SIZE > 0
-    s_mutex_pool_index     = 0;
     s_mutex_pool_cs.handle = xSemaphoreCreateMutexStatic( &s_mutex_pool_cs.data );
 
     // Initialize the mutex pool
     for( auto &mtx : s_mutex_pool )
     {
       mtx.handle = xSemaphoreCreateMutexStatic( &mtx.data );
+      mtx.in_use = false;
     }
 #endif    // MBEDUTILS_OSAL_MUTEX_POOL_SIZE > 0
 
 #if MBEDUTILS_OSAL_RECURSIVE_MUTEX_POOL_SIZE > 0
-    s_r_mtx_pool_idx       = 0;
     s_r_mtx_pool_cs.handle = xSemaphoreCreateMutexStatic( &s_r_mtx_pool_cs.data );
 
     // Initialize the recursive mutex pool
     for( auto &rmtx : s_r_mutex_pool )
     {
       rmtx.handle = xSemaphoreCreateRecursiveMutexStatic( &rmtx.data );
+      rmtx.in_use = false;
     }
 #endif    // MBEDUTILS_OSAL_RECURSIVE_MUTEX_POOL_SIZE > 0
   }
@@ -113,11 +112,15 @@ namespace mb::osal
 #if MBEDUTILS_OSAL_MUTEX_POOL_SIZE > 0
     xSemaphoreTake( s_mutex_pool_cs.handle, portMAX_DELAY );
     {
-      if( s_mutex_pool_index < s_mutex_pool.size() )
+      for( auto &mtx : s_mutex_pool )
       {
-        mutex = reinterpret_cast<mb_mutex_t>( &s_mutex_pool[ s_mutex_pool_index ].handle );
-        s_mutex_pool_index++;
-        allocated = true;
+        if( !mtx.in_use )
+        {
+          mutex = reinterpret_cast<mb_mutex_t>( &mtx.handle );
+          mtx.in_use = true;
+          allocated = true;
+          break;
+        }
       }
     }
     xSemaphoreGive( s_mutex_pool_cs.handle );
@@ -129,9 +132,22 @@ namespace mb::osal
 
   void deallocateMutex( mb_mutex_t &mutex )
   {
-    // TODO: Implement when/if needed. Likely need to change to a pool allocator.
     mbed_dbg_assert( mutex != nullptr );
-    mbed_assert_always();
+#if MBEDUTILS_OSAL_MUTEX_POOL_SIZE > 0
+    xSemaphoreTake( s_mutex_pool_cs.handle, portMAX_DELAY );
+    {
+      for( auto &mtx : s_mutex_pool )
+      {
+        if( &mtx.handle == mutex )
+        {
+          mtx.in_use = false;
+          mutex      = nullptr;
+          break;
+        }
+      }
+    }
+    xSemaphoreGive( s_mutex_pool_cs.handle );
+#endif    // MBEDUTILS_OSAL_MUTEX_POOL_SIZE > 0
   }
 
 
@@ -215,11 +231,15 @@ namespace mb::osal
 #if MBEDUTILS_OSAL_RECURSIVE_MUTEX_POOL_SIZE > 0
     xSemaphoreTake( s_r_mtx_pool_cs.handle, portMAX_DELAY );
     {
-      if( s_r_mtx_pool_idx < s_r_mutex_pool.size() )
+      for( auto &rmtx : s_r_mutex_pool )
       {
-        mutex = reinterpret_cast<mb_recursive_mutex_t>( &s_r_mutex_pool[ s_r_mtx_pool_idx ].handle );
-        s_r_mtx_pool_idx++;
-        allocated = true;
+        if( !rmtx.in_use )
+        {
+          mutex = reinterpret_cast<mb_recursive_mutex_t>( &rmtx.handle );
+          rmtx.in_use = true;
+          allocated = true;
+          break;
+        }
       }
     }
     xSemaphoreGive( s_r_mtx_pool_cs.handle );
@@ -231,9 +251,23 @@ namespace mb::osal
 
   void deallocateRecursiveMutex( mb_recursive_mutex_t &mutex )
   {
-    // TODO: Implement when/if needed. Likely need to change to a pool allocator.
     mbed_dbg_assert( mutex != nullptr );
-    mbed_assert_always();
+
+#if MBEDUTILS_OSAL_RECURSIVE_MUTEX_POOL_SIZE > 0
+    xSemaphoreTake( s_r_mtx_pool_cs.handle, portMAX_DELAY );
+    {
+      for( auto &rmtx : s_r_mutex_pool )
+      {
+        if( &rmtx.handle == mutex )
+        {
+          rmtx.in_use = false;
+          mutex       = nullptr;
+          break;
+        }
+      }
+    }
+    xSemaphoreGive( s_r_mtx_pool_cs.handle );
+#endif    // MBEDUTILS_OSAL_RECURSIVE_MUTEX_POOL_SIZE > 0
   }
 
   void lockRecursiveMutex( mb_recursive_mutex_t mutex )
