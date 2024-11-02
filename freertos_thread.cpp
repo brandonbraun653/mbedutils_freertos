@@ -44,6 +44,8 @@ namespace mb::thread
     void         *args;                      /**< (Optional) User data to pass to the thread */
     TaskHandle_t  freertos_handle;           /**< FreeRTOS handle to the task */
     StaticTask_t *freertos_static_task_data; /**< (Optional) Static allocation parameters */
+    bool          kill_request;              /**< Flag to signal the task to terminate */
+    bool          block_on_start;            /**< Flag to block the task until start() is called */
   };
 
   /*---------------------------------------------------------------------------
@@ -65,13 +67,13 @@ namespace mb::thread
    * @param handle Handle generated from the create_task() function
    * @return std::unordered_map<TaskId, TaskData>::iterator
    */
-  static TaskHandle_t find_task( const TaskHandle handle )
+  static FreeRtosTaskMeta * find_task_meta( const TaskId id )
   {
     for( auto task = s_task_meta_map.begin(); task != s_task_meta_map.end(); ++task )
     {
-      if( ( *task )->id == handle )
+      if( ( *task )->id == id )
       {
-        return ( *task )->freertos_handle;
+        return *task;
       }
     }
 
@@ -114,57 +116,102 @@ namespace mb::thread
   void Task::start()
   {
     mb::thread::LockGuard _lock( s_task_mutex );
-    pImpl = reinterpret_cast<void *>( find_task( mHandle ) );
+
+    /*-------------------------------------------------------------------------
+    Find the task meta structure. This allows us to access the FreeRTOS task
+    handle and start the task.
+    -------------------------------------------------------------------------*/
+    pImpl = reinterpret_cast<void *>( find_task_meta( mId ) );
     if( pImpl == nullptr )
     {
       mbed_assert_always();
       return;
+    }
+
+    /*-------------------------------------------------------------------------
+    Check if the task scheduler is running. This is a prerequisite for starting
+    up the task.
+    -------------------------------------------------------------------------*/
+    if( xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED )
+    {
+      mbed_assert_always();
+      return;
+    }
+
+    /*-------------------------------------------------------------------------
+    Signal the task to begin execution.
+    -------------------------------------------------------------------------*/
+    auto tsk_meta = reinterpret_cast<FreeRtosTaskMeta *>( pImpl );
+    if( tsk_meta->block_on_start )
+    {
+      tsk_meta->kill_request = false;
+      vTaskResume( tsk_meta->freertos_handle );
+    }
+    else
+    {
+      auto state = eTaskGetState( tsk_meta->freertos_handle );
+      mbed_assert_continue_msg( state < eDeleted, "Start called on already running task: %s", mName.c_str() );
     }
   }
 
 
   void Task::kill()
   {
-    mb::thread::intf::destroy_task( mHandle );
-    pImpl   = nullptr;
-    mHandle = TASK_ID_INVALID;
-    mId     = TASK_ID_INVALID;
-    mName.clear();
+    auto tsk_meta = reinterpret_cast<FreeRtosTaskMeta *>( pImpl );
+    if( tsk_meta )
+    {
+      tsk_meta->kill_request = true;
+    }
   }
 
 
   bool Task::killPending()
   {
+    auto tsk_meta = reinterpret_cast<FreeRtosTaskMeta *>( pImpl );
+    if( tsk_meta )
+    {
+      return tsk_meta->kill_request;
+    }
+
     return false;
   }
 
 
   void Task::join()
   {
-    auto tsk_handle = reinterpret_cast<TaskHandle_t>( pImpl );
-    if( !tsk_handle )
+    auto tsk_meta = reinterpret_cast<FreeRtosTaskMeta *>( pImpl );
+    if( !tsk_meta )
     {
       return;
     }
 
-    eTaskState state = eTaskGetState( tsk_handle );
+    /*-------------------------------------------------------------------------
+    Wait for the task to finish executing
+    -------------------------------------------------------------------------*/
+    eTaskState state = eTaskGetState( tsk_meta->freertos_handle );
     while( state != eDeleted )
     {
       vTaskDelay( pdMS_TO_TICKS( 5 ) );
-      state = eTaskGetState( tsk_handle );
+      state = eTaskGetState( tsk_meta->freertos_handle );
     }
+
+    /*-------------------------------------------------------------------------
+    Reverse the create() function
+    -------------------------------------------------------------------------*/
+    mb::thread::destroy( this );
   }
 
 
   bool Task::joinable()
   {
-    auto tsk_handle = reinterpret_cast<TaskHandle_t>( pImpl );
-    if( !tsk_handle )
+    auto tsk_meta = reinterpret_cast<FreeRtosTaskMeta *>( pImpl );
+    if( !tsk_meta )
     {
       return false;
     }
 
-    return eTaskGetState( tsk_handle ) < eDeleted;
+    auto state = eTaskGetState( tsk_meta->freertos_handle );
+    return state < eDeleted;
   }
 
 
@@ -179,11 +226,6 @@ namespace mb::thread
     return mName;
   }
 
-
-  TaskHandle Task::implementation() const
-  {
-    return mHandle;
-  }
 
   namespace this_thread
   {
@@ -242,26 +284,34 @@ namespace mb::thread::intf
   ---------------------------------------------------------------------------*/
 
   /**
-   * @brief Wrapper thread to ensure a safe exit from the FreeRTOS task.
-   *
-   * The general paradigm of the mbedutils threading library is to not leak
-   * implementation details up to the user. FreeRTOS has a unique requirement
-   * that if a thread exits for some reason, it must be deleted from within
-   * the thread itself, just before exit. This function is a wrapper around
-   * the user's thread function to ensure that the task is properly deleted
-   * before the thread exits.
+   * @brief Wrapper to ensure controlled entry/exit from FreeRTOS tasking.
    *
    * @param arg Pointer to a FreeRtosTaskMeta structure
    */
-  static void safe_thread_exit_wrapper( void *arg )
+  static void thread_entry_point( void *arg )
   {
     FreeRtosTaskMeta *meta = reinterpret_cast<FreeRtosTaskMeta *>( arg );
 
+    /*-------------------------------------------------------------------------
+    Wait for a signal to start the task. This ensures control flow is not
+    passed to the user's thread function until the start() method is called.
+    -------------------------------------------------------------------------*/
+    if( meta->block_on_start )
+    {
+      vTaskSuspend( nullptr );
+    }
+
+    /*-------------------------------------------------------------------------
+    Run the user's thread function
+    -------------------------------------------------------------------------*/
     if( meta && meta->func )
     {
       meta->func( meta->args );
     }
 
+    /*-------------------------------------------------------------------------
+    Clean up the task before exiting
+    -------------------------------------------------------------------------*/
     vTaskDelete( nullptr );
   }
 
@@ -310,6 +360,7 @@ namespace mb::thread::intf
     meta->freertos_static_task_data = nullptr;
     meta->func                      = cfg.func;
     meta->args                      = cfg.user_data;
+    meta->block_on_start            = cfg.block_on_start;
 
     /*-------------------------------------------------------------------------
     Ensure the affinity mask is valid. FreeRTOS expects the affinity to be a
@@ -329,7 +380,7 @@ namespace mb::thread::intf
       {
         if( configUSE_CORE_AFFINITY != 1 )
         {
-          auto result = xTaskCreate( safe_thread_exit_wrapper, cfg.name.data(), cfg.stack_size, meta, cfg.priority,
+          auto result = xTaskCreate( thread_entry_point, cfg.name.data(), cfg.stack_size, meta, cfg.priority,
                                      &meta->freertos_handle );
           if( result != pdPASS )
           {
@@ -339,7 +390,7 @@ namespace mb::thread::intf
 #if( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 )
         else if( affinity != 0 )
         {
-          auto result = xTaskCreateAffinitySet( safe_thread_exit_wrapper, cfg.name.data(), cfg.stack_size, meta, cfg.priority,
+          auto result = xTaskCreateAffinitySet( thread_entry_point, cfg.name.data(), cfg.stack_size, meta, cfg.priority,
                                                 affinity, &meta->freertos_handle );
           if( result != pdPASS )
           {
@@ -361,14 +412,14 @@ namespace mb::thread::intf
 
         if( configUSE_CORE_AFFINITY != 1 )
         {
-          meta->freertos_handle = xTaskCreateStatic( safe_thread_exit_wrapper, cfg.name.data(), cfg.stack_size, meta,
+          meta->freertos_handle = xTaskCreateStatic( thread_entry_point, cfg.name.data(), cfg.stack_size, meta,
                                                      cfg.priority, cfg.stack_buf, meta->freertos_static_task_data );
         }
 #if( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 )
         else if( affinity != 0 )
         {
           meta->freertos_handle =
-              xTaskCreateStaticAffinitySet( safe_thread_exit_wrapper, cfg.name.data(), cfg.stack_size, meta, cfg.priority,
+              xTaskCreateStaticAffinitySet( thread_entry_point, cfg.name.data(), cfg.stack_size, meta, cfg.priority,
                                             cfg.stack_buf, meta->freertos_static_task_data, affinity );
         }
 #endif /* ( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 ) */
@@ -394,6 +445,18 @@ namespace mb::thread::intf
     -------------------------------------------------------------------------*/
     s_task_meta_map.push_back( meta );
 
+    /*-------------------------------------------------------------------------
+    Don't return until we know the thread has started. This ensures proper
+    control flow with the start() method and thread_entry_point().
+    -------------------------------------------------------------------------*/
+    if( meta->block_on_start )
+    {
+      while( eTaskGetState( meta->freertos_handle ) != eSuspended )
+      {
+        vPortYield();
+      }
+    }
+
     return cfg.id;
   }
 
@@ -408,42 +471,56 @@ namespace mb::thread::intf
       return;
     }
 
-    /*-------------------------------------------------------------------------
-    Ensure exclusive access to the task pools
-    -------------------------------------------------------------------------*/
     mbed_dbg_assert( s_task_mutex != nullptr );
     mb::thread::RecursiveLockGuard _lock( s_task_mutex );
 
     /*-------------------------------------------------------------------------
-    All task resources are stored in the meta structure, so we can just
-    delete the task from the FreeRTOS perspective and then release the
-    meta structure back to the pool.
+    Find the meta structure associated with this task
     -------------------------------------------------------------------------*/
-    auto meta = reinterpret_cast<FreeRtosTaskMeta *>( task );
-    if( s_task_meta_pool.is_in_pool( meta ) )
+    FreeRtosTaskMeta *meta = nullptr;
+    for( auto &taskMeta : s_task_meta_map )
     {
-      /*-----------------------------------------------------------------------
-      Delete the FreeRTOS task
-      -----------------------------------------------------------------------*/
-      if( meta->freertos_handle != nullptr )
+      if( taskMeta->id == task )
+      {
+        meta = taskMeta;
+        break;
+      }
+    }
+
+    if( meta == nullptr )
+    {
+      return;
+    }
+
+    mbed_dbg_assert( s_task_meta_pool.is_in_pool( meta ) );
+
+    /*-----------------------------------------------------------------------
+    Delete the FreeRTOS task
+    -----------------------------------------------------------------------*/
+    if( meta->freertos_handle != nullptr )
+    {
+      if( eTaskGetState( meta->freertos_handle ) < eDeleted )
       {
         vTaskDelete( meta->freertos_handle );
       }
 
-      /*-----------------------------------------------------------------------
-      Deallocate the static task if it was used
-      -----------------------------------------------------------------------*/
-      if( meta->freertos_static_task_data && s_task_pool.is_in_pool( meta->freertos_static_task_data ) )
-      {
-        s_task_pool.release( meta->freertos_static_task_data );
-      }
-
-      /*-----------------------------------------------------------------------
-      Deregister and release the meta structure back to the pool
-      -----------------------------------------------------------------------*/
-      s_task_meta_map.erase( etl::remove( s_task_meta_map.begin(), s_task_meta_map.end(), meta ), s_task_meta_map.end() );
-      s_task_meta_pool.release( meta );
+      meta->freertos_handle = nullptr;
     }
+
+    /*-----------------------------------------------------------------------
+    Deallocate the static task if it was used
+    -----------------------------------------------------------------------*/
+    if( meta->freertos_static_task_data != nullptr )
+    {
+      mbed_dbg_assert( s_task_pool.is_in_pool( meta->freertos_static_task_data ) );
+      s_task_pool.release( meta->freertos_static_task_data );
+    }
+
+    /*-----------------------------------------------------------------------
+    Deregister and release the meta structure back to the pool
+    -----------------------------------------------------------------------*/
+    s_task_meta_pool.release( meta );
+    s_task_meta_map.erase( etl::remove( s_task_meta_map.begin(), s_task_meta_map.end(), meta ), s_task_meta_map.end() );
   }
 
 

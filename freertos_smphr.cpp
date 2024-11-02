@@ -65,8 +65,8 @@ namespace mb::osal
   bool createSmphr( mb_smphr_t &s, const size_t maxCount, const size_t initialCount )
   {
     mbed_dbg_assert( s == nullptr );
-    mbed_dbg_assert( maxCount < std::numeric_limits<int16_t>::max() );
-    mbed_dbg_assert( initialCount < std::numeric_limits<int16_t>::max() );
+    mbed_dbg_assert( maxCount < std::numeric_limits<UBaseType_t>::max() );
+    mbed_dbg_assert( initialCount < std::numeric_limits<UBaseType_t>::max() );
 
     SemaphoreHandle_t tmp = xSemaphoreCreateCounting( maxCount, initialCount );
     if( tmp == nullptr )
@@ -92,8 +92,8 @@ namespace mb::osal
   {
     bool allocated = false;
     mbed_dbg_assert( s == nullptr );
-    mbed_dbg_assert( maxCount < std::numeric_limits<int16_t>::max() );
-    mbed_dbg_assert( initialCount < std::numeric_limits<int16_t>::max() );
+    mbed_dbg_assert( maxCount < std::numeric_limits<UBaseType_t>::max() );
+    mbed_dbg_assert( initialCount < std::numeric_limits<UBaseType_t>::max() );
 
 #if MBEDUTILS_OSAL_SEMAPHORE_POOL_SIZE > 0
     xSemaphoreTake( s_smphr_pool_cs.handle, portMAX_DELAY );
