@@ -55,7 +55,6 @@ namespace mb::thread
   static etl::pool<StaticTask_t, configMBEDUTILS_MAX_NUM_TASKS>         s_task_pool;
   static etl::pool<FreeRtosTaskMeta, configMBEDUTILS_MAX_NUM_TASKS>     s_task_meta_pool;
   static etl::vector<FreeRtosTaskMeta *, configMBEDUTILS_MAX_NUM_TASKS> s_task_meta_map;
-  static size_t                                                         s_module_ready = ~DRIVER_INITIALIZED_KEY;
 
   /*---------------------------------------------------------------------------
   Private Functions
@@ -67,7 +66,7 @@ namespace mb::thread
    * @param id ID returned from the create_task() function
    * @return std::unordered_map<TaskId, TaskData>::iterator
    */
-  static FreeRtosTaskMeta * find_task_meta( const TaskId id )
+  static FreeRtosTaskMeta *find_task_meta( const TaskId id )
   {
     for( auto task = s_task_meta_map.begin(); task != s_task_meta_map.end(); ++task )
     {
@@ -380,8 +379,8 @@ namespace mb::thread::intf
       {
         if( configUSE_CORE_AFFINITY != 1 )
         {
-          auto result = xTaskCreate( thread_entry_point, cfg.name.data(), cfg.stack_size, meta, cfg.priority,
-                                     &meta->freertos_handle );
+          auto result =
+              xTaskCreate( thread_entry_point, cfg.name.data(), cfg.stack_size, meta, cfg.priority, &meta->freertos_handle );
           if( result != pdPASS )
           {
             meta->freertos_handle = nullptr;
@@ -412,15 +411,17 @@ namespace mb::thread::intf
 
         if( configUSE_CORE_AFFINITY != 1 )
         {
-          meta->freertos_handle = xTaskCreateStatic( thread_entry_point, cfg.name.data(), cfg.stack_size, meta,
-                                                     cfg.priority, cfg.stack_buf, meta->freertos_static_task_data );
+          static_assert( sizeof( StackType_t ) == sizeof( cfg.stack_buf[ 0 ] ), "StackType_t size mismatch" );
+          meta->freertos_handle =
+              xTaskCreateStatic( thread_entry_point, cfg.name.data(), cfg.stack_size, meta, cfg.priority,
+                                 reinterpret_cast<StackType_t *>( cfg.stack_buf ), meta->freertos_static_task_data );
         }
 #if( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 )
         else if( affinity != 0 )
         {
-          meta->freertos_handle =
-              xTaskCreateStaticAffinitySet( thread_entry_point, cfg.name.data(), cfg.stack_size, meta, cfg.priority,
-                                            cfg.stack_buf, meta->freertos_static_task_data, affinity );
+          meta->freertos_handle = xTaskCreateStaticAffinitySet( thread_entry_point, cfg.name.data(), cfg.stack_size, meta,
+                                                                cfg.priority, reinterpret_cast<StackType_t *>( cfg.stack_buf ),
+                                                                meta->freertos_static_task_data, affinity );
         }
 #endif /* ( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 ) */
       }
