@@ -62,9 +62,9 @@ namespace mb::thread
   ---------------------------------------------------------------------------*/
 
   /**
-   * @brief Looks up a task in the internal map based on the handle.
+   * @brief Looks up a task in the internal map based on the ID.
    *
-   * @param handle Handle generated from the create_task() function
+   * @param id ID returned from the create_task() function
    * @return std::unordered_map<TaskId, TaskData>::iterator
    */
   static FreeRtosTaskMeta * find_task_meta( const TaskId id )
@@ -332,7 +332,7 @@ namespace mb::thread::intf
   }
 
 
-  TaskHandle create_task( Task::Config &cfg )
+  TaskId create_task( Task::Config &cfg )
   {
     /*---------------------------------------------------------------------------
     Input validation
@@ -461,7 +461,7 @@ namespace mb::thread::intf
   }
 
 
-  void destroy_task( TaskHandle task )
+  void destroy_task( TaskId task )
   {
     /*-------------------------------------------------------------------------
     Input validation
@@ -524,7 +524,7 @@ namespace mb::thread::intf
   }
 
 
-  void set_affinity( TaskHandle task, size_t coreId )
+  void set_affinity( TaskId task, size_t coreId )
   {
 #if configUSE_CORE_AFFINITY == 1
     /*-------------------------------------------------------------------------
@@ -539,9 +539,9 @@ namespace mb::thread::intf
     Set the core affinity for the task
     -------------------------------------------------------------------------*/
     auto meta = reinterpret_cast<FreeRtosTaskMeta *>( task );
-    if( meta->handle != nullptr )
+    if( meta->freertos_handle != nullptr )
     {
-      vTaskCoreAffinitySet( meta->handle, coreId );
+      vTaskCoreAffinitySet( meta->freertos_handle, coreId );
     }
 #endif /* configUSE_CORE_AFFINITY */
   }
