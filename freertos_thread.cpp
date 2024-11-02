@@ -499,11 +499,31 @@ namespace mb::thread::intf
     -----------------------------------------------------------------------*/
     if( meta->freertos_handle != nullptr )
     {
+      /*---------------------------------------------------------------------
+      It's highly likely the task is already in the process of being deleted,
+      but just in case, we'll check and delete it if necessary.
+      ---------------------------------------------------------------------*/
       if( eTaskGetState( meta->freertos_handle ) < eDeleted )
       {
         vTaskDelete( meta->freertos_handle );
       }
 
+      /*---------------------------------------------------------------------
+      Yield back to the scheduler to give the system a chance to run the
+      idle task and clean up the task resources. If we don't do this, the
+      pool cleanup operations will corrupt the handle and cause a hard fault.
+      This was found as a result of integration testing.
+
+      Unfortunately, the FreeRTOS architecture expects task deletion to be
+      associated with a "power off" type event, so it doesn't really have a
+      concept of "waiting for a task to finish". This is the best we can do.
+
+      This delay to allow the idle task a chance to run will likely only fail
+      on highly loaded systems where the idle task doesn't even get execution
+      time. But if that's the case, you also probably aren't deleting tasks
+      rapidly either.
+      ---------------------------------------------------------------------*/
+      vTaskDelay( pdMS_TO_TICKS( 25 ) );
       meta->freertos_handle = nullptr;
     }
 
