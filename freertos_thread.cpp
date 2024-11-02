@@ -11,12 +11,13 @@
 /*-----------------------------------------------------------------------------
 Includes
 -----------------------------------------------------------------------------*/
-#include "mbedutils/drivers/threading/lock.hpp"
 #include "mbedutils/drivers/threading/thread.hpp"
-#include <FreeRTOS.h>
 #include <etl/pool.h>
 #include <mbedutils/assert.hpp>
+#include <mbedutils/interfaces/thread_intf.hpp>
 #include <mbedutils/threading.hpp>
+
+#include <FreeRTOS.h>
 #include <task.h>
 
 /*-----------------------------------------------------------------------------
@@ -38,9 +39,11 @@ namespace mb::thread
 
   struct FreeRtosTaskMeta
   {
-    TaskId        id;     /**< System identifier for the thread */
-    TaskHandle_t  handle; /**< FreeRTOS handle to the task */
-    StaticTask_t *task;   /**< (Optional) Static allocation parameters */
+    TaskId        id;                        /**< System identifier for the thread */
+    TaskFunction  func;                      /**< Function to run as the task */
+    void         *args;                      /**< (Optional) User data to pass to the thread */
+    TaskHandle_t  freertos_handle;           /**< FreeRTOS handle to the task */
+    StaticTask_t *freertos_static_task_data; /**< (Optional) Static allocation parameters */
   };
 
   /*---------------------------------------------------------------------------
@@ -68,7 +71,7 @@ namespace mb::thread
     {
       if( ( *task )->id == handle )
       {
-        return ( *task )->handle;
+        return ( *task )->freertos_handle;
       }
     }
 
@@ -89,9 +92,18 @@ namespace mb::thread
   }
 
 
+  Task::Task( Task &&other ) noexcept
+  {
+    this->mId     = other.mId;
+    this->mName   = other.mName;
+    this->mHandle = other.mHandle;
+    this->pImpl   = other.pImpl;
+  }
+
   Task &Task::operator=( Task &&other ) noexcept
   {
     this->mId     = other.mId;
+    this->mName   = other.mName;
     this->mHandle = other.mHandle;
     this->pImpl   = other.pImpl;
 
@@ -113,11 +125,11 @@ namespace mb::thread
 
   void Task::kill()
   {
-    auto tsk_data = reinterpret_cast<TaskHandle_t>( pImpl );
-    if( tsk_data )
-    {
-      vTaskDelete( tsk_data );
-    }
+    mb::thread::intf::destroy_task( mHandle );
+    pImpl   = nullptr;
+    mHandle = TASK_ID_INVALID;
+    mId     = TASK_ID_INVALID;
+    mName.clear();
   }
 
 
@@ -126,15 +138,33 @@ namespace mb::thread
     return false;
   }
 
+
   void Task::join()
   {
-    this->kill();
+    auto tsk_handle = reinterpret_cast<TaskHandle_t>( pImpl );
+    if( !tsk_handle )
+    {
+      return;
+    }
+
+    eTaskState state = eTaskGetState( tsk_handle );
+    while( state != eDeleted )
+    {
+      vTaskDelay( pdMS_TO_TICKS( 5 ) );
+      state = eTaskGetState( tsk_handle );
+    }
   }
 
 
   bool Task::joinable()
   {
-    return true;
+    auto tsk_handle = reinterpret_cast<TaskHandle_t>( pImpl );
+    if( !tsk_handle )
+    {
+      return false;
+    }
+
+    return eTaskGetState( tsk_handle ) < eDeleted;
   }
 
 
@@ -194,7 +224,7 @@ namespace mb::thread
 
       for( auto task = s_task_meta_map.begin(); task != s_task_meta_map.end(); ++task )
       {
-        if( ( *task )->handle == handle )
+        if( ( *task )->freertos_handle == handle )
         {
           return ( *task )->id;
         }
@@ -207,6 +237,34 @@ namespace mb::thread
 
 namespace mb::thread::intf
 {
+  /*---------------------------------------------------------------------------
+  Private Functions
+  ---------------------------------------------------------------------------*/
+
+  /**
+   * @brief Wrapper thread to ensure a safe exit from the FreeRTOS task.
+   *
+   * The general paradigm of the mbedutils threading library is to not leak
+   * implementation details up to the user. FreeRTOS has a unique requirement
+   * that if a thread exits for some reason, it must be deleted from within
+   * the thread itself, just before exit. This function is a wrapper around
+   * the user's thread function to ensure that the task is properly deleted
+   * before the thread exits.
+   *
+   * @param arg Pointer to a FreeRtosTaskMeta structure
+   */
+  static void safe_thread_exit_wrapper( void *arg )
+  {
+    FreeRtosTaskMeta *meta = reinterpret_cast<FreeRtosTaskMeta *>( arg );
+
+    if( meta && meta->func )
+    {
+      meta->func( meta->args );
+    }
+
+    vTaskDelete( nullptr );
+  }
+
   /*---------------------------------------------------------------------------
   Public Functions
   ---------------------------------------------------------------------------*/
@@ -231,7 +289,7 @@ namespace mb::thread::intf
     ---------------------------------------------------------------------------*/
     if( ( cfg.func == nullptr ) || ( cfg.name.empty() ) )
     {
-      return 0;
+      return TASK_ID_INVALID;
     }
 
     /*-------------------------------------------------------------------------
@@ -244,12 +302,14 @@ namespace mb::thread::intf
     if( meta == nullptr )
     {
       mbed_assert_continue_msg( false, "FreeRTOS task meta pool is full" );
-      return 0;
+      return TASK_ID_INVALID;
     }
 
-    meta->id     = cfg.id;
-    meta->handle = 0;
-    meta->task   = nullptr;
+    meta->id                        = cfg.id;
+    meta->freertos_handle           = nullptr;
+    meta->freertos_static_task_data = nullptr;
+    meta->func                      = cfg.func;
+    meta->args                      = cfg.user_data;
 
     /*-------------------------------------------------------------------------
     Ensure the affinity mask is valid. FreeRTOS expects the affinity to be a
@@ -269,20 +329,21 @@ namespace mb::thread::intf
       {
         if( configUSE_CORE_AFFINITY != 1 )
         {
-          auto result = xTaskCreate( cfg.func, cfg.name.data(), cfg.stack_size, cfg.user_data, cfg.priority, &meta->handle );
+          auto result = xTaskCreate( safe_thread_exit_wrapper, cfg.name.data(), cfg.stack_size, meta, cfg.priority,
+                                     &meta->freertos_handle );
           if( result != pdPASS )
           {
-            meta->handle = nullptr;
+            meta->freertos_handle = nullptr;
           }
         }
 #if( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 )
         else if( affinity != 0 )
         {
-          auto result = xTaskCreateAffinitySet( cfg.func, cfg.name.data(), cfg.stack_size, cfg.user_data, cfg.priority,
-                                                affinity, &meta->handle );
+          auto result = xTaskCreateAffinitySet( safe_thread_exit_wrapper, cfg.name.data(), cfg.stack_size, meta, cfg.priority,
+                                                affinity, &meta->freertos_handle );
           if( result != pdPASS )
           {
-            meta->handle = nullptr;
+            meta->freertos_handle = nullptr;
           }
         }
 #endif /* ( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 ) */
@@ -296,18 +357,19 @@ namespace mb::thread::intf
     {
       if( ( cfg.stack_buf != nullptr ) && ( cfg.stack_size > 0 ) )
       {
-        meta->task = s_task_pool.allocate();
+        meta->freertos_static_task_data = s_task_pool.allocate();
 
         if( configUSE_CORE_AFFINITY != 1 )
         {
-          meta->handle = xTaskCreateStatic( cfg.func, cfg.name.data(), cfg.stack_size, cfg.user_data, cfg.priority,
-                                            cfg.stack_buf, meta->task );
+          meta->freertos_handle = xTaskCreateStatic( safe_thread_exit_wrapper, cfg.name.data(), cfg.stack_size, meta,
+                                                     cfg.priority, cfg.stack_buf, meta->freertos_static_task_data );
         }
 #if( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 )
         else if( affinity != 0 )
         {
-          meta->handle = xTaskCreateStaticAffinitySet( cfg.func, cfg.name.data(), cfg.stack_size, cfg.user_data, cfg.priority,
-                                                       cfg.stack_buf, meta->task, affinity );
+          meta->freertos_handle =
+              xTaskCreateStaticAffinitySet( safe_thread_exit_wrapper, cfg.name.data(), cfg.stack_size, meta, cfg.priority,
+                                            cfg.stack_buf, meta->freertos_static_task_data, affinity );
         }
 #endif /* ( configNUMBER_OF_CORES > 1 ) && ( configUSE_CORE_AFFINITY == 1 ) */
       }
@@ -316,16 +378,21 @@ namespace mb::thread::intf
     /*-------------------------------------------------------------------------
     Clean up allocated resources should the task fail to create for some reason
     -------------------------------------------------------------------------*/
-    if( meta->handle == 0 )
+    if( meta->freertos_handle == nullptr )
     {
-      if( meta->task && s_task_pool.is_in_pool( meta->task ) )
+      if( meta->freertos_static_task_data && s_task_pool.is_in_pool( meta->freertos_static_task_data ) )
       {
-        s_task_pool.release( meta->task );
+        s_task_pool.release( meta->freertos_static_task_data );
       }
 
       s_task_meta_pool.release( meta );
-      return 0;
+      return TASK_ID_INVALID;
     }
+
+    /*-------------------------------------------------------------------------
+    Add the task to the internal map for later lookup
+    -------------------------------------------------------------------------*/
+    s_task_meta_map.push_back( meta );
 
     return cfg.id;
   }
@@ -336,7 +403,7 @@ namespace mb::thread::intf
     /*-------------------------------------------------------------------------
     Input validation
     -------------------------------------------------------------------------*/
-    if( task == 0 )
+    if( task == TASK_ID_INVALID )
     {
       return;
     }
@@ -355,18 +422,26 @@ namespace mb::thread::intf
     auto meta = reinterpret_cast<FreeRtosTaskMeta *>( task );
     if( s_task_meta_pool.is_in_pool( meta ) )
     {
-      /* FreeRTOS task deletion */
-      if( meta->handle != nullptr )
+      /*-----------------------------------------------------------------------
+      Delete the FreeRTOS task
+      -----------------------------------------------------------------------*/
+      if( meta->freertos_handle != nullptr )
       {
-        vTaskDelete( meta->handle );
+        vTaskDelete( meta->freertos_handle );
       }
 
-      /* If the task was statically allocated, this will need to be released as well */
-      if( meta->task && s_task_pool.is_in_pool( meta->task ) )
+      /*-----------------------------------------------------------------------
+      Deallocate the static task if it was used
+      -----------------------------------------------------------------------*/
+      if( meta->freertos_static_task_data && s_task_pool.is_in_pool( meta->freertos_static_task_data ) )
       {
-        s_task_pool.release( meta->task );
+        s_task_pool.release( meta->freertos_static_task_data );
       }
 
+      /*-----------------------------------------------------------------------
+      Deregister and release the meta structure back to the pool
+      -----------------------------------------------------------------------*/
+      s_task_meta_map.erase( etl::remove( s_task_meta_map.begin(), s_task_meta_map.end(), meta ), s_task_meta_map.end() );
       s_task_meta_pool.release( meta );
     }
   }
