@@ -40,6 +40,7 @@ namespace mb::thread
   struct FreeRtosTaskMeta
   {
     TaskId        id;                        /**< System identifier for the thread */
+    Task         *pTask;                     /**< Pointer to the task object */
     TaskFunction  func;                      /**< Function to run as the task */
     void         *args;                      /**< (Optional) User data to pass to the thread */
     TaskHandle_t  freertos_handle;           /**< FreeRTOS handle to the task */
@@ -120,12 +121,16 @@ namespace mb::thread
     Find the task meta structure. This allows us to access the FreeRTOS task
     handle and start the task.
     -------------------------------------------------------------------------*/
-    pImpl = reinterpret_cast<void *>( find_task_meta( mId ) );
+    auto tsk_meta = find_task_meta( mId );
+
+    pImpl = reinterpret_cast<void *>( tsk_meta );
     if( pImpl == nullptr )
     {
       mbed_assert_always();
       return;
     }
+
+    tsk_meta->pTask = this;
 
     /*-------------------------------------------------------------------------
     Check if the task scheduler is running. This is a prerequisite for starting
@@ -133,14 +138,12 @@ namespace mb::thread
     -------------------------------------------------------------------------*/
     if( xTaskGetSchedulerState() == taskSCHEDULER_NOT_STARTED )
     {
-      mbed_assert_always();
       return;
     }
 
     /*-------------------------------------------------------------------------
     Signal the task to begin execution.
     -------------------------------------------------------------------------*/
-    auto tsk_meta = reinterpret_cast<FreeRtosTaskMeta *>( pImpl );
     if( tsk_meta->block_on_start )
     {
       tsk_meta->kill_request = false;
@@ -272,6 +275,24 @@ namespace mb::thread
       }
 
       return TASK_ID_INVALID;
+    }
+
+
+    mb::thread::Task *task()
+    {
+      mb::thread::LockGuard _lock( s_task_mutex );
+
+      auto handle = xTaskGetCurrentTaskHandle();
+
+      for( auto task = s_task_meta_map.begin(); task != s_task_meta_map.end(); ++task )
+      {
+        if( ( *task )->freertos_handle == handle )
+        {
+          return ( *task )->pTask;
+        }
+      }
+
+      return nullptr;
     }
   }    // namespace this_thread
 }    // namespace mb::thread
