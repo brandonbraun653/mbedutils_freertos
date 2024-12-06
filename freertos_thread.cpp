@@ -111,13 +111,15 @@ namespace mb::thread
 
   void Task::start()
   {
-    mb::thread::LockGuard _lock( s_task_mutex );
-
     /*-------------------------------------------------------------------------
     Find the task meta structure. This allows us to access the FreeRTOS task
     handle and start the task.
     -------------------------------------------------------------------------*/
-    auto tsk_meta = find_task_meta( mId );
+    FreeRtosTaskMeta * tsk_meta = nullptr;
+    {
+      mb::thread::LockGuard _lock( s_task_mutex );
+      tsk_meta = find_task_meta( mId );
+    }
 
     pImpl = reinterpret_cast<void *>( tsk_meta );
     if( pImpl == nullptr )
