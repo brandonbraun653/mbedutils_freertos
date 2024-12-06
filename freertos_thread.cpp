@@ -11,7 +11,6 @@
 /*-----------------------------------------------------------------------------
 Includes
 -----------------------------------------------------------------------------*/
-#include "mbedutils/drivers/threading/thread.hpp"
 #include <etl/pool.h>
 #include <mbedutils/assert.hpp>
 #include <mbedutils/interfaces/thread_intf.hpp>
@@ -27,9 +26,6 @@ Validate user configuration parameters from in the project's FreeRTOSConfig.h
 #if !defined( configMBEDUTILS_MAX_NUM_TASKS ) || ( configMBEDUTILS_MAX_NUM_TASKS <= 0 )
 #error "configMBEDUTILS_MAX_NUM_TASKS must be defined as > 0 in FreeRTOSConfig.h"
 #endif
-
-// static_assert( configMAX_PRIORITIES >= std::numeric_limits<mb::thread::TaskPriority>::max(),
-//                "configMAX_PRIORITIES incorrectly sized" );
 
 namespace mb::thread
 {
@@ -380,7 +376,7 @@ namespace mb::thread::intf
     meta->freertos_static_task_data = nullptr;
     meta->func                      = cfg.func;
     meta->args                      = cfg.user_data;
-    meta->block_on_start            = cfg.block_on_start;
+    meta->block_on_start            = cfg.block_on_create;
 
     /*-------------------------------------------------------------------------
     Ensure the affinity mask is valid. FreeRTOS expects the affinity to be a
@@ -471,7 +467,7 @@ namespace mb::thread::intf
     Don't return until we know the thread has started. This ensures proper
     control flow with the start() method and thread_entry_point().
     -------------------------------------------------------------------------*/
-    if( meta->block_on_start )
+    if( meta->block_on_start && ( xTaskGetSchedulerState() == taskSCHEDULER_RUNNING ) )
     {
       while( eTaskGetState( meta->freertos_handle ) != eSuspended )
       {
